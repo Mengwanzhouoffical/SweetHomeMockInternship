@@ -21,6 +21,7 @@ package com.eteks.sweethome3d.swing;
 
 import java.awt.Color;
 import java.awt.Dimension;
+import java.awt.EventQueue;
 import java.awt.Font;
 import java.awt.FontMetrics;
 import java.awt.Graphics;
@@ -35,10 +36,13 @@ import java.awt.print.Paper;
 import java.awt.print.Printable;
 import java.awt.print.PrinterException;
 import java.awt.print.PrinterJob;
+import java.lang.reflect.InvocationTargetException;
 import java.security.AccessControlException;
 import java.text.MessageFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.List;
 import java.util.MissingResourceException;
 import java.util.ResourceBundle;
 import java.util.Set;
@@ -178,6 +182,29 @@ public class HomePrintableComponent extends JComponent implements Printable {
     }
   }
   
+  /**
+   * Changes the visible columns of the furniture table in Event Dispatch Thread,
+   * because Swing components must be modified only in that thread.
+   */
+  private void setFurnitureVisibleProperties(
+      final List<HomePieceOfFurniture.SortableProperty> properties) throws PrinterException {
+    if (EventQueue.isDispatchThread()) {
+      this.home.setFurnitureVisibleProperties(properties);
+    } else {
+      try {
+        EventQueue.invokeAndWait(new Runnable() {
+            public void run() {
+              home.setFurnitureVisibleProperties(properties);
+            }
+          });
+      } catch (InterruptedException ex) {
+        throw new InterruptedPrinterException();
+      } catch (InvocationTargetException ex) {
+        throw new RuntimeException(ex.getCause());
+      }
+    }
+  }
+
   /**
    * Prints a given <code>page</code>.
    */
@@ -351,25 +378,44 @@ public class HomePrintableComponent extends JComponent implements Printable {
           && (homePrint == null
               || homePrint.isPlanPrinted()
               || homePrint.isView3DPrinted())) {
-        final Level selectedLevel = home.getSelectedLevel();
         furnitureTable = (FurnitureTable)furnitureView;
         furnitureFilter = furnitureTable.getFurnitureFilter();
         furnitureTable.setFurnitureFilter(new FurnitureTable.FurnitureFilter() {
             public boolean include(Home home, HomePieceOfFurniture piece) {
-              // Print only furniture at selected level when the plan or the 3D view is printed
+              // Print furniture of every viewable level when the plan or the 3D view is printed
               return (furnitureFilter == null || furnitureFilter.include(home, piece))
-                  && piece.isAtLevel(selectedLevel)
                   && (piece.getLevel() == null || piece.getLevel().isViewable());
             }
           });
       } else {
         furnitureFilter = null;
       }
-      // Try to print next furniture view page      
-      pageExists = ((Printable)furnitureView).print(g2D, pageFormat, page);
-      if (furnitureTable != null) {
-        // Restore previous filter
-        ((FurnitureTable)furnitureView).setFurnitureFilter(furnitureFilter);
+      // Temporarily display a Level column to distinguish furniture of each level
+      List<HomePieceOfFurniture.SortableProperty> visibleProperties =
+          new ArrayList<HomePieceOfFurniture.SortableProperty>(this.home.getFurnitureVisibleProperties());
+      boolean levelColumnAdded = furnitureView instanceof FurnitureTable
+          && !this.home.getLevels().isEmpty()
+          && !visibleProperties.contains(HomePieceOfFurniture.SortableProperty.LEVEL);
+      if (levelColumnAdded) {
+        List<HomePieceOfFurniture.SortableProperty> printedProperties =
+            new ArrayList<HomePieceOfFurniture.SortableProperty>(visibleProperties);
+        // Place Level column after Name column
+        printedProperties.add(printedProperties.indexOf(HomePieceOfFurniture.SortableProperty.NAME) + 1,
+            HomePieceOfFurniture.SortableProperty.LEVEL);
+        setFurnitureVisibleProperties(printedProperties);
+      }
+      try {
+        // Try to print next furniture view page      
+        pageExists = ((Printable)furnitureView).print(g2D, pageFormat, page);
+      } finally {
+        if (furnitureTable != null) {
+          // Restore previous filter
+          furnitureTable.setFurnitureFilter(furnitureFilter);
+        }
+        if (levelColumnAdded) {
+          // Restore on-screen columns
+          setFurnitureVisibleProperties(visibleProperties);
+        }
       }
       if (pageExists == PAGE_EXISTS
           && !this.printablePages.contains(page)) {
